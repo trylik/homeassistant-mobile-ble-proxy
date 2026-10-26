@@ -6,27 +6,38 @@ import org.junit.Test
 
 class GattConnectionReadyGateTest {
     @Test
-    fun cachedConnectionIsReadyWhenLinkConnects() {
-        val gate = GattConnectionReadyGate(requiresFreshServices = false)
+    fun cachedConnectionIsReadyAtLinkUpWhenAndroidCacheWasLoaded() {
+        val gate = GattConnectionReadyGate(acceptsPlatformCache = true)
 
-        assertTrue(gate.onLinkConnected())
+        assertTrue(gate.onLinkConnected(platformCacheReady = true).emitConnectionReady)
         assertTrue(gate.isReady)
-        assertFalse(gate.isWaitingForFreshServices)
-        assertFalse(gate.onFreshServicesDiscovered())
-        assertFalse(gate.onLinkConnected())
+        assertFalse(gate.isWaitingForServices)
+        assertFalse(gate.onServicesDiscovered())
+        assertFalse(gate.onLinkConnected(platformCacheReady = true).emitConnectionReady)
     }
 
     @Test
-    fun noCacheConnectionWaitsForFreshServices() {
-        val gate = GattConnectionReadyGate(requiresFreshServices = true)
+    fun cachedConnectionWaitsWhenNewAndroidSessionHasNoLocalServiceTable() {
+        val gate = GattConnectionReadyGate(acceptsPlatformCache = true)
 
-        assertFalse(gate.onLinkConnected())
+        assertFalse(gate.onLinkConnected(platformCacheReady = false).emitConnectionReady)
         assertFalse(gate.isReady)
-        assertTrue(gate.isWaitingForFreshServices)
+        assertTrue(gate.isWaitingForServices)
 
-        assertTrue(gate.onFreshServicesDiscovered())
+        assertTrue(gate.onServicesDiscovered())
         assertTrue(gate.isReady)
-        assertFalse(gate.isWaitingForFreshServices)
-        assertFalse(gate.onFreshServicesDiscovered())
+        assertFalse(gate.isWaitingForServices)
+        assertFalse(gate.onServicesDiscovered())
+    }
+
+    @Test
+    fun noCacheConnectionIgnoresPlatformCacheAndWaitsForDiscovery() {
+        val gate = GattConnectionReadyGate(acceptsPlatformCache = false)
+
+        assertFalse(gate.onLinkConnected(platformCacheReady = true).emitConnectionReady)
+        assertTrue(gate.isWaitingForServices)
+
+        assertTrue(gate.onServicesDiscovered())
+        assertTrue(gate.isReady)
     }
 }

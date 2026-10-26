@@ -190,7 +190,7 @@ class BluetoothGattProxyManager(
         val disconnectWatchdog: DisconnectWatchdog,
     ) {
         val readyGate = GattConnectionReadyGate(
-            requiresFreshServices = serviceCachePolicy == ServiceCachePolicy.FORCE_DISCOVERY,
+            acceptsPlatformCache = serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE,
         )
         var connectTimeout: Runnable? = null
         var mtuNegotiationPending: Boolean = false
@@ -1026,9 +1026,9 @@ class BluetoothGattProxyManager(
             emit(Event.DevicePairing(address = connection.address, paired = false, error = error))
             logInfo("GATT pair follow-up discovery failed for ${connection.macAddress}: error=$error")
         }
-        if (failedOperation is PendingOperation.DiscoverServices && connection.readyGate.isWaitingForFreshServices) {
+        if (failedOperation is PendingOperation.DiscoverServices && connection.readyGate.isWaitingForServices) {
             logInfo(
-                "GATT no-cache connection setup failed for ${connection.macAddress} " +
+                "GATT connection setup failed for ${connection.macAddress} " +
                     "during service discovery: error=$error",
             )
             closeConnection(connection, error)
@@ -1418,24 +1418,28 @@ class BluetoothGattProxyManager(
                         connection.state = ConnectionState.CONNECTED
                         logInfo("GATT connected to ${connection.macAddress}; requesting MTU $REQUESTED_MTU")
                         emit(Event.DeviceLinkConnected(address = connection.address))
-                        if (connection.readyGate.onLinkConnected()) {
-                            emitConnectionReady(connection)
-                        } else {
-                            logInfo(
-                                "GATT delaying connection-ready response for ${connection.macAddress} " +
-                                    "until fresh service discovery completes",
-                            )
-                        }
                         if (!hasConnectPermission()) {
                             closeConnection(connection, ERROR_PERMISSION_DENIED)
                             return@runOnMain
                         }
+                        val platformCacheReady =
+                            connection.serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE &&
+                                tryPopulateServiceCacheFromPlatform(connection, "connection setup")
+                        val setupDecision = connection.readyGate.onLinkConnected(platformCacheReady)
+                        if (setupDecision.emitConnectionReady) {
+                            emitConnectionReady(connection)
+                        } else {
+                            logInfo(
+                                "GATT delaying connection-ready response for ${connection.macAddress} " +
+                                    "until the local service table is ready",
+                            )
+                        }
                         try {
                             beginInitialMtuNegotiation(connection)
                             val mtuRequestStarted = gatt.requestMtu(REQUESTED_MTU)
-                            if (connection.readyGate.isWaitingForFreshServices) {
+                            if (setupDecision.discoverServices) {
                                 connection.emitServicesAfterDiscovery = false
-                                requestServiceDiscovery(connection, "no-cache connection setup")
+                                requestServiceDiscovery(connection, "local service table connection setup")
                             }
                             if (!mtuRequestStarted) {
                                 logInfo("GATT MTU request returned false for ${connection.macAddress}; continuing with default MTU ${connection.mtu}")
@@ -1511,9 +1515,9 @@ class BluetoothGattProxyManager(
                     connection.servicesLoaded = true
                     connection.serviceRefreshRequired = false
                     logDiscoveredServices(connection, services, "discoverServices()")
-                    if (connection.readyGate.onFreshServicesDiscovered()) {
+                    if (connection.readyGate.onServicesDiscovered()) {
                         logInfo(
-                            "GATT fresh services ready for ${connection.macAddress}; " +
+                            "GATT local service table ready for ${connection.macAddress}; " +
                                 "emitting delayed connection-ready response",
                         )
                         emitConnectionReady(connection)
