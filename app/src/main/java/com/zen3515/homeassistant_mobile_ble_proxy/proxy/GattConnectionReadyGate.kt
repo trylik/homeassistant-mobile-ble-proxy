@@ -1,35 +1,53 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
+internal data class GattConnectionSetupDecision(
+    val emitConnectionReady: Boolean,
+    val discoverServices: Boolean,
+)
+
+internal fun decideGattConnectionSetup(
+    acceptsPlatformCache: Boolean,
+    platformCacheReady: Boolean,
+): GattConnectionSetupDecision {
+    val localServiceTableReady = acceptsPlatformCache && platformCacheReady
+    return GattConnectionSetupDecision(
+        emitConnectionReady = localServiceTableReady,
+        discoverServices = !localServiceTableReady,
+    )
+}
+
 /**
  * Tracks when an ESPHome Bluetooth connection may be reported as ready.
  *
- * A v3 connection with a client-side cache is ready as soon as Android reports
- * the link connected. A v3 connection without a cache must first complete fresh
- * service discovery; the GATT manager serializes that discovery behind its
- * initial MTU gate.
+ * Home Assistant's remote cache only stores the exported handle numbers. Every
+ * new Android [android.bluetooth.BluetoothGatt] still needs a local service
+ * table so those handles can be resolved to the current session's characteristic
+ * objects. A cached connection may therefore become ready at link-up only when
+ * Android has already supplied that local table. Otherwise it waits for service
+ * discovery, just like a connection that explicitly requested fresh services.
  */
 internal class GattConnectionReadyGate(
-    private val requiresFreshServices: Boolean,
+    private val acceptsPlatformCache: Boolean,
 ) {
     var isReady: Boolean = false
         private set
 
-    val isWaitingForFreshServices: Boolean
-        get() = requiresFreshServices && !isReady
+    val isWaitingForServices: Boolean
+        get() = !isReady
 
-    fun onLinkConnected(): Boolean =
-        if (requiresFreshServices) {
-            false
+    fun onLinkConnected(platformCacheReady: Boolean): GattConnectionSetupDecision {
+        val decision = decideGattConnectionSetup(
+            acceptsPlatformCache = acceptsPlatformCache,
+            platformCacheReady = platformCacheReady,
+        )
+        return if (decision.emitConnectionReady) {
+            decision.copy(emitConnectionReady = markReady())
         } else {
-            markReady()
+            decision
         }
+    }
 
-    fun onFreshServicesDiscovered(): Boolean =
-        if (requiresFreshServices) {
-            markReady()
-        } else {
-            false
-        }
+    fun onServicesDiscovered(): Boolean = markReady()
 
     private fun markReady(): Boolean {
         if (isReady) {
