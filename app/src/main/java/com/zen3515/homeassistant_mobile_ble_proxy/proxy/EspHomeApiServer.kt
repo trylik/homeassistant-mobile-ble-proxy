@@ -41,6 +41,9 @@ class EspHomeApiServer(
     private var acceptJob: Job? = null
     private var advertisementFlushJob: Job? = null
     private var bleAdvEventJob: Job? = null
+    private val gattEvents = OrderedEventDispatcher<BluetoothGattProxyManager.Event>(scope) { event ->
+        handleGattEvent(event)
+    }
 
     // Raw advertisements awaiting ble_adv processing, handed off the main thread. Bounded so a
     // burst of advertising traffic cannot grow unboundedly; oldest is dropped under pressure.
@@ -92,8 +95,8 @@ class EspHomeApiServer(
         context = context,
         maxConnections = MAX_CONNECTION_SLOTS,
         onEvent = { event ->
-            scope.launch {
-                handleGattEvent(event)
+            if (!gattEvents.dispatch(event) && !closed.get()) {
+                onError("Failed to enqueue GATT event ${event::class.java.simpleName}")
             }
         },
         onError = onError,
@@ -188,6 +191,7 @@ class EspHomeApiServer(
         advertisementFlushJob?.cancel()
         bleAdvEventJob?.cancel()
         bleAdvEvents.close()
+        gattEvents.close()
         val socket = serverSocket
         serverSocket = null
         acceptJob = null
