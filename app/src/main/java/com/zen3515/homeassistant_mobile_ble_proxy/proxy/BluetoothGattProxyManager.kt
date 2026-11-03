@@ -188,6 +188,7 @@ class BluetoothGattProxyManager(
         var state: ConnectionState,
         var mtu: Int,
         val disconnectWatchdog: DisconnectWatchdog,
+        val activityWatchdog: GattActivityWatchdog,
     ) {
         val readyGate = GattConnectionReadyGate(
             acceptsPlatformCache = serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE,
@@ -1148,6 +1149,11 @@ class BluetoothGattProxyManager(
                 postDelayed = { callback, delayMs -> mainHandler.postDelayed(callback, delayMs) },
                 removeCallback = mainHandler::removeCallbacks,
             ),
+            activityWatchdog = GattActivityWatchdog(
+                timeoutMs = GATT_IDLE_TIMEOUT_MS,
+                postDelayed = { callback, delayMs -> mainHandler.postDelayed(callback, delayMs) },
+                removeCallback = mainHandler::removeCallbacks,
+            ),
         )
         scheduleConnectTimeout(connections.getValue(address))
         updateAllocatedSnapshot()
@@ -1214,6 +1220,7 @@ class BluetoothGattProxyManager(
         connection.connectTimeout?.let(mainHandler::removeCallbacks)
         connection.connectTimeout = null
         connection.disconnectWatchdog.cancel()
+        connection.activityWatchdog.cancel()
         connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
         connection.mtuNegotiationTimeout = null
         connection.mtuNegotiationPending = false
@@ -1318,6 +1325,24 @@ class BluetoothGattProxyManager(
         }
     }
 
+    private fun startActivityWatchdog(connection: Connection) {
+        connection.activityWatchdog.start {
+            val current = connections[connection.address]
+            if (current !== connection || connection.state != ConnectionState.CONNECTED) {
+                return@start
+            }
+            logInfo(
+                "GATT connection idle for ${connection.macAddress} for ${GATT_IDLE_TIMEOUT_MS}ms; " +
+                    "closing the stale lease",
+            )
+            closeConnection(connection, ERROR_OPERATION_FAILED)
+        }
+    }
+
+    private fun recordGattActivity(connection: Connection) {
+        connection.activityWatchdog.recordActivity()
+    }
+
     private fun completeInitialMtuNegotiation(connection: Connection, releaseReason: String) {
         if (!connection.mtuNegotiationPending) {
             return
@@ -1416,6 +1441,7 @@ class BluetoothGattProxyManager(
                         connection.connectTimeout?.let(mainHandler::removeCallbacks)
                         connection.connectTimeout = null
                         connection.state = ConnectionState.CONNECTED
+                        startActivityWatchdog(connection)
                         logInfo("GATT connected to ${connection.macAddress}; requesting MTU $REQUESTED_MTU")
                         emit(Event.DeviceLinkConnected(address = connection.address))
                         if (!hasConnectPermission()) {
@@ -1471,6 +1497,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         connection.mtu = mtu
                         logInfo("GATT MTU changed for ${connection.macAddress}: mtu=$mtu")
@@ -1490,6 +1517,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
 
                     val inFlight = connection.inFlightOperation
                     if (inFlight !is PendingOperation.DiscoverServices) {
@@ -1582,6 +1610,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
 
                     val inFlight = connection.inFlightOperation as? PendingOperation.WriteCharacteristic ?: return@runOnMain
                     if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -1604,6 +1633,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
 
                     when (val inFlight = connection.inFlightOperation) {
                         is PendingOperation.WriteDescriptor -> {
@@ -1672,6 +1702,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
 
                     val inFlight = connection.inFlightOperation as? PendingOperation.ReadCharacteristic ?: return@runOnMain
                     if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -1700,6 +1731,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
 
                     val inFlight = connection.inFlightOperation as? PendingOperation.ReadDescriptor ?: return@runOnMain
                     if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -1727,6 +1759,7 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    recordGattActivity(connection)
                     val handle = resolveCharacteristicHandle(connection, characteristic) ?: return@runOnMain
 
                     emit(
@@ -2063,6 +2096,7 @@ class BluetoothGattProxyManager(
         private const val REQUESTED_MTU = 517
         private const val CONNECT_TIMEOUT_MS = 10_000L
         private const val DISCONNECT_TIMEOUT_MS = 10_000L
+        private const val GATT_IDLE_TIMEOUT_MS = 15L * 60L * 1000L
         private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L
