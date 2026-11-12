@@ -31,8 +31,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The runner image ships an Android SDK with its licenses accepted (ANDROID_HOME); AGP fetches a missing
+      # platform itself. android-actions/setup-android@v3 fails its license step on the current image.
+      - name: Point Gradle at the preinstalled Android SDK
+        run: echo "sdk.dir=${ANDROID_HOME}" > local.properties
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
