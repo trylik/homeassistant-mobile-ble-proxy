@@ -189,6 +189,7 @@ class BluetoothGattProxyManager(
         var mtu: Int,
         val disconnectWatchdog: DisconnectWatchdog,
         val activityWatchdog: GattActivityWatchdog,
+        val unacknowledgedWrite: WriteWithoutResponseGate,
     ) {
         val readyGate = GattConnectionReadyGate(
             acceptsPlatformCache = serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE,
@@ -1021,8 +1022,15 @@ class BluetoothGattProxyManager(
         }
 
         if (operation is PendingOperation.WriteCharacteristic && !operation.withResponse) {
+            // Answer HA at once, as before, but keep the queue held until Android's onCharacteristicWrite:
+            // the GATT client stays busy until then and refuses the next fragment (HATAB-63).
             emit(Event.GattWrite(connection.address, operation.handle))
-            completeOperation(connection)
+            connection.unacknowledgedWrite.begin {
+                if (connections[connection.address] === connection && connection.inFlightOperation === operation) {
+                    logInfo("GATT write-without-response callback missing for ${connection.macAddress}; releasing queue")
+                    completeOperation(connection)
+                }
+            }
         }
     }
 
@@ -1171,6 +1179,11 @@ class BluetoothGattProxyManager(
                 postDelayed = { callback, delayMs -> mainHandler.postDelayed(callback, delayMs) },
                 removeCallback = mainHandler::removeCallbacks,
             ),
+            unacknowledgedWrite = WriteWithoutResponseGate(
+                timeoutMs = WRITE_WITHOUT_RESPONSE_ACK_TIMEOUT_MS,
+                postDelayed = { callback, delayMs -> mainHandler.postDelayed(callback, delayMs) },
+                removeCallback = mainHandler::removeCallbacks,
+            ),
         )
         scheduleConnectTimeout(connections.getValue(address))
         updateAllocatedSnapshot()
@@ -1238,6 +1251,7 @@ class BluetoothGattProxyManager(
         connection.connectTimeout = null
         connection.disconnectWatchdog.cancel()
         connection.activityWatchdog.cancel()
+        connection.unacknowledgedWrite.reset()
         connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
         connection.mtuNegotiationTimeout = null
         connection.mtuNegotiationPending = false
@@ -1630,6 +1644,16 @@ class BluetoothGattProxyManager(
                     recordGattActivity(connection)
 
                     val inFlight = connection.inFlightOperation as? PendingOperation.WriteCharacteristic ?: return@runOnMain
+                    if (!inFlight.withResponse) {
+                        // HA already got its write response; this callback only frees the GATT client.
+                        if (connection.unacknowledgedWrite.acknowledge()) {
+                            if (status != BluetoothGatt.GATT_SUCCESS) {
+                                logInfo("GATT write-without-response to ${connection.macAddress} reported status=$status")
+                            }
+                            completeOperation(connection)
+                        }
+                        return@runOnMain
+                    }
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         emit(Event.GattWrite(address = address, handle = inFlight.handle))
                         completeOperation(connection)
@@ -2114,6 +2138,10 @@ class BluetoothGattProxyManager(
         private const val CONNECT_TIMEOUT_MS = 10_000L
         private const val DISCONNECT_TIMEOUT_MS = 10_000L
         private const val GATT_IDLE_TIMEOUT_MS = 15L * 60L * 1000L
+
+        // Android acknowledges a write-without-response within a few connection intervals (tens of ms);
+        // this only bounds a callback that never arrives.
+        private const val WRITE_WITHOUT_RESPONSE_ACK_TIMEOUT_MS = 1_000L
         private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L
