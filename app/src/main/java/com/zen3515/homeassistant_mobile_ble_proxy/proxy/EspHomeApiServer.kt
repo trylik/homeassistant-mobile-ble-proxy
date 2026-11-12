@@ -55,6 +55,7 @@ class EspHomeApiServer(
 
     private val clientsLock = Any()
     private val clients = mutableSetOf<ClientSession>()
+    private val leaseOwners = GattLeaseOwnership<ClientSession>()
     private val pendingAdvertisementsLock = Any()
     private val pendingAdvertisements = java.util.LinkedHashMap<Long, RawAdvertisement>()
     private val pendingFingerprintToAddress = HashMap<AdvertisementFingerprint, Long>()
@@ -483,12 +484,31 @@ class EspHomeApiServer(
         }
         ProxyRuntimeState.setClientCount(count)
 
+        val orphanedLeases = leaseOwners.releaseOwner(session)
+        if (orphanedLeases.isNotEmpty() && !closed.get()) {
+            log("Releasing ${orphanedLeases.size} GATT lease(s) left by ${session.remoteAddress}")
+            gattManager.releaseConnections(orphanedLeases)
+        }
+
         if (shouldStopScanner && !closed.get()) {
             scannerEngine.stop()
             clearAdvertisementDeliveryState("last advertisement client disconnected")
             log("Stopped scanner because no subscribed BLE advertisement clients remain")
         }
         log("Clients now: $count")
+    }
+
+    private fun recordLeaseOwnership(session: ClientSession, request: EspHomeProtoCodec.DeviceRequest) {
+        when (request.requestType) {
+            EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT,
+            EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT_V3_WITH_CACHE,
+            EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT_V3_WITHOUT_CACHE,
+            -> leaseOwners.recordConnect(request.address, session)
+
+            EspHomeProtoCodec.BluetoothDeviceRequestType.DISCONNECT -> leaseOwners.recordEnded(request.address)
+
+            else -> Unit
+        }
     }
 
     private fun handleFrame(session: ClientSession, frame: EspHomeFrameCodec.Frame): Boolean {
@@ -656,6 +676,7 @@ class EspHomeApiServer(
 
             EspHomeMessageType.BLUETOOTH_DEVICE_REQUEST -> {
                 val request = EspHomeProtoCodec.parseDeviceRequest(frame.payload) ?: return false
+                recordLeaseOwnership(session, request)
                 gattManager.handleDeviceRequest(request)
                 true
             }
@@ -779,6 +800,7 @@ class EspHomeApiServer(
 
             is BluetoothGattProxyManager.Event.DeviceConnection -> {
                 if (!event.connected) {
+                    leaseOwners.recordEnded(event.address)
                     clearAdvertisementRuntimeStateForAddress(
                         address = event.address,
                         reason = "GATT disconnect",
