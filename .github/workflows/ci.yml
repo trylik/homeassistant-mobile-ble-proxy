@@ -1,0 +1,50 @@
+name: CI
+
+# The pull-request gate the fork lacked (HATAB-63): the release workflow runs only on v* tags, so PRs
+# used to merge on local test runs alone.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests + debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The runner image ships an Android SDK with its licenses accepted (ANDROID_HOME); AGP fetches a missing
+      # platform itself. android-actions/setup-android@v3 fails its license step on the current image.
+      - name: Point Gradle at the preinstalled Android SDK
+        run: echo "sdk.dir=${ANDROID_HOME}" > local.properties
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests and debug APK
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/

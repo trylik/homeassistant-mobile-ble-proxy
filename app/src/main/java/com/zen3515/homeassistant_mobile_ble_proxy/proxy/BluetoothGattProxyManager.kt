@@ -313,6 +313,23 @@ class BluetoothGattProxyManager(
         }
     }
 
+    /**
+     * Disconnects the leases an API client left behind when its session ended (HATAB-63), as ESPHome
+     * firmware does. Addresses without a live lease are skipped, so nobody gets a spurious disconnect event.
+     */
+    fun releaseConnections(addresses: Collection<Long>) {
+        if (addresses.isEmpty()) return
+        val pending = addresses.toList()
+        runOnMain {
+            for (address in pending) {
+                if (connections[address] != null) {
+                    logInfo("Releasing GATT lease on ${ProxyIdentity.longToMac(address)}: its API client disconnected")
+                    disconnectDevice(address)
+                }
+            }
+        }
+    }
+
     fun handleGetServices(address: Long) {
         runOnMain {
             val connection = connections[address]
